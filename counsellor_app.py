@@ -1,7 +1,7 @@
 import os
 import re
 import pandas as pd
-from pypdf import PdfReader
+import pdfplumber
 import autogen
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -14,7 +14,7 @@ def parse_cutoff_pdf(pdf_path):
     Advanced sliding grid token text compiler. Extracts exact cell indices 
     from multi-line sequences to match headers to percentile arrays.
     """
-    reader = PdfReader(pdf_path)
+    reader = pdfplumber.open(pdf_path)
     structured_data = []
     
     current_college = "Unknown Institute"
@@ -26,7 +26,7 @@ def parse_cutoff_pdf(pdf_path):
     seat_token_pattern = re.compile(r'\b([GLPDRD][A-Z0-9]{3,8})\b')
     percentile_pattern = re.compile(r'\(\s*(\d{1,2}\.\d+)\s*\)')
     
-    for page_idx, page in enumerate(reader.pages):
+    for page in reader.pages:
         text = page.extract_text()
         if not text:
             continue
@@ -97,6 +97,8 @@ def generate_robust_baseline_matrix():
 
 # Load database globally
 pdf_filename = "2023ENGG_CAP1_CutOff.pdf"
+if not os.path.exists(pdf_filename):
+    raise FileNotFoundError(f"Critical Error: Place your source document '{pdf_filename}' in this folder.")
 df_database = parse_cutoff_pdf(pdf_filename)
 
 
@@ -144,19 +146,15 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
     final_df = pd.DataFrame()
     
     while search_margin <= 30.0:
-        # Match options that fall below or slightly above the student's score
         temp_df = base_filtered[base_filtered["Cutoff Percentile"] <= (student_percentile + search_margin)].copy()
         temp_df = temp_df.sort_values(by="Cutoff Percentile", ascending=False)
-        
-        # Remove duplicate rows for the same college and course combination
         temp_df = temp_df.drop_duplicates(subset=["College", "Course"], keep="first")
         
         if len(temp_df) >= 20 or len(base_filtered) == len(temp_df) or search_margin >= 20.0:
             final_df = temp_df.head(25)
             break
-        search_margin += 2.0  # Widen the window by 2% on each iteration
+        search_margin += 2.0
 
-    # Last resort fallback row extraction to prevent empty sheets
     if final_df.empty:
         final_df = base_filtered.sort_values(by="Cutoff Percentile", ascending=False).drop_duplicates(subset=["College", "Course"]).head(22)
 
@@ -231,7 +229,7 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
 
 
 # =====================================================================
-# 3. AUTOGEN REDUNDANT CONTEXT ORG ENGINE
+# 3. AUTOGEN AGENT INITIALIZATION
 # =====================================================================
 groq_api_key = os.environ.get("GROQ_API_KEY", "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")
 config_list = [
@@ -272,9 +270,27 @@ user_proxy = autogen.UserProxyAgent(
 )
 user_proxy.register_function(function_map={"find_and_export_colleges": find_and_export_colleges})
 
+
+# =====================================================================
+# 4. CONTINUOUS LOOP GATEWAY
+# =====================================================================
 if __name__ == "__main__":
     print("\n=======================================================")
     print("  Welcome to the AutoGen CAP Admission Counsellor AI   ")
-    print("=======================================================\n")
-    user_query = input("Ask me anything about your admission:\n> ")
-    user_proxy.initiate_chat(counsellor, message=user_query)
+    print("=======================================================")
+    print("Type 'exit', 'quit', or 'q' at any time to end the program.\n")
+    
+    while True:
+        user_query = input("Ask me anything about your admission profile:\n> ")
+        
+        # Clean checking check to catch exit expressions
+        if user_query.strip().lower() in ["exit", "quit", "q"]:
+            print("\nThank you for using CAP Admission Counsellor AI. Best of luck with your college allotment selections! Goodbye.")
+            break
+            
+        print("\nProcessing profile request via AutoGen framework collaboration...")
+        user_proxy.initiate_chat(
+            counsellor,
+            message=user_query
+        )
+        print("\n" + "-"*60 + "\n")
