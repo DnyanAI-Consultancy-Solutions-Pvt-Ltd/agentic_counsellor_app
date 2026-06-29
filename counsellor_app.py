@@ -1,10 +1,15 @@
 import os
 import re
+import time
 import pandas as pd
 import pdfplumber
 import autogen
+from dotenv import load_dotenv
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+
+# Load environment configurations securely from the local .env file
+load_dotenv()
 
 # =====================================================================
 # 1. STATEFUL GRIDS AND SLIDING-WINDOW PATTERN MATRIX PARSER
@@ -80,22 +85,21 @@ def parse_cutoff_pdf(pdf_path):
     return df
 
 def generate_robust_baseline_matrix():
-    """Fallback generator to guarantee code runtime resilience."""
     mock_records = []
-    branches = ["301224510 - Computer Engineering", "600624610 - Information Technology", "321524210 - Computer Science"]
-    colleges = ["3012 - VJTI, Mumbai", "6006 - COEP, Pune", "3215 - SPIT, Mumbai", "6271 - PICT, Pune"]
-    seats = ["GOPENS", "GOPENH", "GOBCS", "EWS", "TFWS", "PWDOPENS", "PWDOBCS"]
+    branches = ["301224510 - Computer Engineering", "600624610 - Information Technology"]
+    colleges = ["3012 - VJTI, Mumbai", "6006 - COEP, Pune"]
+    seats = ["GOPENS", "GOBCS", "EWS", "PWDOPENS"]
     import random
     for col in colleges:
         for br in branches:
             for st in seats:
                 mock_records.append({
                     "College": col, "Course": br, "Seat Type": st, 
-                    "Cutoff Percentile": round(random.uniform(75.0, 99.8), 7)
+                    "Cutoff Percentile": round(random.uniform(85.0, 99.5), 7)
                 })
     return pd.DataFrame(mock_records)
 
-# Load database globally
+# Initialize global dataset from the original source file
 pdf_filename = "2023ENGG_CAP1_CutOff.pdf"
 if not os.path.exists(pdf_filename):
     raise FileNotFoundError(f"Critical Error: Place your source document '{pdf_filename}' in this folder.")
@@ -103,17 +107,27 @@ df_database = parse_cutoff_pdf(pdf_filename)
 
 
 # =====================================================================
-# 2. DYNAMIC RELAXATION EXCEL GENERATION ENGINE
+# 2. DYNAMIC RELAXATION EXCEL GENERATION ENGINE (ISOLATED OUTPUTS)
 # =====================================================================
-def find_and_export_colleges(student_percentile: float, seat_category: str, choice_stream: str = None, is_pwd: bool = False, output_excel: str = "CAP_Round_Allotment_Preferences.xlsx") -> str:
+def find_and_export_colleges(student_percentile: float, seat_category: str, choice_stream: str = None, is_pwd: bool = False) -> str:
     """
-    Executes search with zero hardcoding. Features an automated window-relaxation 
-    loop that expands the percentile range until at least 20 entries are matched.
+    Searches the database without hardcoded queries. Creates a dedicated 'outputs' folder
+    and saves each query into a timestamped, styled Excel preference sheet.
     """
     global df_database
     cat = seat_category.strip().upper()
     
-    # Standardize category search patterns
+    # Isolate a dedicated, standalone output folder pathway
+    output_dir = "outputs"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    # Establish dynamic unique file naming format strings
+    safe_stream_tag = re.sub(r'[^a-zA-Z0-9]', '_', choice_stream or 'any').strip('_')
+    unique_filename = f"CAP_Preferences_{student_percentile}_{safe_stream_tag}_{int(time.time())}.xlsx"
+    full_output_path = os.path.join(output_dir, unique_filename)
+
+    # Standardize seat categories
     if is_pwd:
         targets = [f"PWD{cat}S", f"PWD{cat}H", f"PWD{cat}", f"PWDR{cat}S", "PWDOPENS", "PWDOPENH"]
     else:
@@ -125,7 +139,7 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
     if base_filtered.empty:
         base_filtered = df_database.copy()
 
-    # Apply choice stream/branch filtering via Regex mapping
+    # Stream filtering implementation
     if choice_stream and choice_stream.lower() != "any":
         clean_stream = choice_stream.replace("/", " or ").replace("&", " or ")
         tokens = [t.strip() for t in re.split(r'\bor\b', clean_stream, flags=re.IGNORECASE) if t.strip()]
@@ -141,7 +155,7 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
         regex_q = "|".join([re.escape(e) for e in expanded_tokens])
         base_filtered = base_filtered[base_filtered["Course"].str.contains(regex_q, case=False, na=False)]
 
-    # DYNAMIC RELAXATION LOOP: Expands search bounds automatically until >= 20 options are met
+    # Dynamic relaxation search loop
     search_margin = 1.5
     final_df = pd.DataFrame()
     
@@ -158,11 +172,11 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
     if final_df.empty:
         final_df = base_filtered.sort_values(by="Cutoff Percentile", ascending=False).drop_duplicates(subset=["College", "Course"]).head(22)
 
-    # Assign sequential preference rankings
+    # Sorting configurations
     final_df = final_df.copy().sort_values(by="Cutoff Percentile", ascending=False)
     final_df.insert(0, "Preference No", range(1, len(final_df) + 1))
     
-    # Calculate reasoning logic strings
+    # Fill Reasoning Logic parameters
     reasoning_log = []
     for idx, row in final_df.iterrows():
         cutoff = row["Cutoff Percentile"]
@@ -177,20 +191,14 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
     final_df["Reasoning Logic"] = reasoning_log
     final_df = final_df[["Preference No", "College", "Course", "Seat Type", "Cutoff Percentile", "Reasoning Logic"]]
 
-    # Handle file permission locks gracefully if open in Excel
-    try:
-        writer = pd.ExcelWriter(output_excel, engine='openpyxl')
-    except PermissionError:
-        import time
-        output_excel = f"CAP_Preferences_Allotment_{int(time.time())}.xlsx"
-        writer = pd.ExcelWriter(output_excel, engine='openpyxl')
-
+    # Export configuration layer
+    writer = pd.ExcelWriter(full_output_path, engine='openpyxl')
     with writer:
         final_df.to_excel(writer, index=False, sheet_name="Preferences")
         worksheet = writer.sheets["Preferences"]
         worksheet.views.sheetView[0].showGridLines = True
         
-        # Executive Navy Styling Suite
+        # Style definition templates
         h_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
         h_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
         z_fill = PatternFill(start_color="F7F9FC", end_color="F7F9FC", fill_type="solid")
@@ -225,13 +233,17 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
             max_len = max(len(str(c.value or '')) for c in col)
             worksheet.column_dimensions[letter].width = min(max(max_len + 3, 12), 75)
 
-    return f"Successfully generated your premium choice report in Excel with {len(final_df)} entries saved to '{output_excel}'."
+    return f"Successfully generated your unique preference sheet inside the isolated outputs folder path: '{full_output_path}'"
 
 
 # =====================================================================
-# 3. AUTOGEN AGENT INITIALIZATION
+# 3. AUTOGEN AGENT ENGINE CONFIGURATION
 # =====================================================================
-groq_api_key = os.environ.get("GROQ_API_KEY", "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")
+# Dynamically extract private key value directly from the environment space
+groq_api_key = os.environ.get("GROQ_API_KEY")
+if not groq_api_key:
+    raise ValueError("System Missing Variable Context: Ensure you've defined your GROQ_API_KEY entry inside your .env configuration file.")
+
 config_list = [
     {'model': 'llama-3.3-70b-versatile', 'api_key': groq_api_key, 'api_type': 'openai', 'base_url': 'https://api.groq.com/openai/v1'},
     {'model': 'mixtral-8x7b-32768', 'api_key': groq_api_key, 'api_type': 'openai', 'base_url': 'https://api.groq.com/openai/v1'}
@@ -241,7 +253,7 @@ llm_config = {
     "config_list": config_list, "timeout": 60, "temperature": 0.0,
     "functions": [{
         "name": "find_and_export_colleges",
-        "description": "Queries the cutoff database using constraints and saves unique options into a styled Excel preference sheet.",
+        "description": "Queries the cutoff database using constraints and saves isolated unique sessions inside an output folder path.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -259,8 +271,8 @@ counsellor = autogen.AssistantAgent(
     name="Counsellor_Agent", llm_config=llm_config,
     system_message="""You are an expert engineering admissions counsellor agent for the CAP rounds.
 Parse the user's natural query statement, extract their percentile, category code, preferred branches, and PWD status.
-Execute the 'find_and_export_colleges' tool immediately with these parameters to generate a professionally formatted Excel spreadsheet.
-Once complete, notify the user that their premium spreadsheet report is generated and conclude with 'TERMINATE'."""
+Execute the 'find_and_export_colleges' tool immediately with these parameters to generate an isolated, custom structured spreadsheet.
+Once complete, notify the user that their unique spreadsheet report is generated inside the outputs directory and conclude with 'TERMINATE'."""
 )
 
 user_proxy = autogen.UserProxyAgent(
@@ -283,9 +295,8 @@ if __name__ == "__main__":
     while True:
         user_query = input("Ask me anything about your admission profile:\n> ")
         
-        # Clean checking check to catch exit expressions
         if user_query.strip().lower() in ["exit", "quit", "q"]:
-            print("\nThank you for using CAP Admission Counsellor AI. Best of luck with your college allotment selections! Goodbye.")
+            print("\nThank you for using CAP Admission Counsellor AI. Goodbye.")
             break
             
         print("\nProcessing profile request via AutoGen framework collaboration...")
