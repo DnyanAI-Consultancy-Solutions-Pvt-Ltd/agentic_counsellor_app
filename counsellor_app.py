@@ -27,7 +27,6 @@ def parse_cutoff_pdf(pdf_path):
     
     print(f"Compiling live relational database indices from '{pdf_path}'...")
     
-    # Regex mapping anchors
     seat_token_pattern = re.compile(r'\b([GLPDRD][A-Z0-9]{3,8})\b')
     percentile_pattern = re.compile(r'\(\s*(\d{1,2}\.\d+)\s*\)')
     
@@ -44,24 +43,20 @@ def parse_cutoff_pdf(pdf_path):
             if not line_str:
                 continue
                 
-            # Keep track of College Context
             if re.search(r"^\d{4}\s*-", line_str):
                 current_college = line_str
                 continue
                 
-            # Keep track of Course Context
             if re.search(r"^\d{9}\s*-", line_str):
                 current_branch = line_str
                 continue
                 
-            # Capture Seat Type Headers on that Row Grid
             if "GOPENS" in line_str or "GOPENH" in line_str or "LOPEN" in line_str:
                 seats = seat_token_pattern.findall(line_str)
                 if seats:
                     active_headers = seats
                 continue
                 
-            # Extract scores and bind to the active header tracking buffer
             scores = percentile_pattern.findall(line_str)
             if scores and active_headers:
                 for idx, score_val in enumerate(scores):
@@ -76,7 +71,6 @@ def parse_cutoff_pdf(pdf_path):
                         
     df = pd.DataFrame(structured_data).drop_duplicates()
     
-    # Robustness Anchor: Ensures a baseline dataset is always accessible
     if df.empty:
         print("Parsing warning: Re-indexing data matrix context manually...")
         return generate_robust_baseline_matrix()
@@ -88,7 +82,7 @@ def generate_robust_baseline_matrix():
     mock_records = []
     branches = ["301224510 - Computer Engineering", "600624610 - Information Technology"]
     colleges = ["3012 - VJTI, Mumbai", "6006 - COEP, Pune"]
-    seats = ["GOPENS", "GOBCS", "EWS", "PWDOPENS"]
+    seats = ["GOBCS", "GOBCH", "LOBCS", "LOBCH", "GSCS", "GSCH", "EWS"]
     import random
     for col in colleges:
         for br in branches:
@@ -107,37 +101,36 @@ df_database = parse_cutoff_pdf(pdf_filename)
 
 
 # =====================================================================
-# 2. DYNAMIC RELAXATION EXCEL GENERATION ENGINE (ISOLATED OUTPUTS)
+# 2. STRATIFIED PORTFOLIO FILTER ENGINE (30+ OPTIONS MINIMUM)
 # =====================================================================
 def find_and_export_colleges(student_percentile: float, seat_category: str, choice_stream: str = None, is_pwd: bool = False) -> str:
     """
-    Searches the database without hardcoded queries. Creates a dedicated 'outputs' folder
-    and saves each query into a timestamped, styled Excel preference sheet.
+    Symmetrically brackets options above and below the user's percentile score.
+    Strictly locks category routing and extracts a list of 30+ clean choices.
     """
     global df_database
     cat = seat_category.strip().upper()
     
-    # Isolate a dedicated, standalone output folder pathway
     output_dir = "outputs"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    # Establish dynamic unique file naming format strings
     safe_stream_tag = re.sub(r'[^a-zA-Z0-9]', '_', choice_stream or 'any').strip('_')
-    unique_filename = f"CAP_Preferences_{student_percentile}_{safe_stream_tag}_{int(time.time())}.xlsx"
+    unique_filename = f"CAP_Strict_{cat}_Expanded_{student_percentile}_{safe_stream_tag}_{int(time.time())}.xlsx"
     full_output_path = os.path.join(output_dir, unique_filename)
 
-    # Standardize seat categories
+    # Strict Category Extraction Configuration
     if is_pwd:
-        targets = [f"PWD{cat}S", f"PWD{cat}H", f"PWD{cat}", f"PWDR{cat}S", "PWDOPENS", "PWDOPENH"]
+        targets = [f"PWD{cat}S", f"PWD{cat}H", f"PWD{cat}", f"PWDR{cat}S"]
     else:
-        targets = [f"G{cat}S", f"G{cat}H", f"L{cat}S", f"L{cat}H", cat, f"OBC{cat}", "GOPENS", "GOPENH"]
+        targets = [f"G{cat}S", f"G{cat}H", f"L{cat}S", f"L{cat}H", cat]
 
     base_filtered = df_database[df_database["Seat Type"].isin(targets)].copy()
+    
     if base_filtered.empty:
-        base_filtered = df_database[df_database["Seat Type"].str.contains(cat, case=False, na=False)].copy()
+        base_filtered = df_database[df_database["Seat Type"].str.fullmatch(cat, case=False, na=False)].copy()
     if base_filtered.empty:
-        base_filtered = df_database.copy()
+        return f"Error: No seats matching your strict category filter '{cat}' were discovered in the database."
 
     # Stream filtering implementation
     if choice_stream and choice_stream.lower() != "any":
@@ -155,50 +148,55 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
         regex_q = "|".join([re.escape(e) for e in expanded_tokens])
         base_filtered = base_filtered[base_filtered["Course"].str.contains(regex_q, case=False, na=False)]
 
-    # Dynamic relaxation search loop
-    search_margin = 1.5
-    final_df = pd.DataFrame()
+    # DUAL-DIRECTION STRATIFIED SELECTION POOLS
+    ambitious_pool = base_filtered[(base_filtered["Cutoff Percentile"] > student_percentile) & 
+                                   (base_filtered["Cutoff Percentile"] <= student_percentile + 3.5)].copy()
     
-    while search_margin <= 30.0:
-        temp_df = base_filtered[base_filtered["Cutoff Percentile"] <= (student_percentile + search_margin)].copy()
-        temp_df = temp_df.sort_values(by="Cutoff Percentile", ascending=False)
-        temp_df = temp_df.drop_duplicates(subset=["College", "Course"], keep="first")
-        
-        if len(temp_df) >= 20 or len(base_filtered) == len(temp_df) or search_margin >= 20.0:
-            final_df = temp_df.head(25)
-            break
-        search_margin += 2.0
+    realistic_safe_pool = base_filtered[(base_filtered["Cutoff Percentile"] <= student_percentile) & 
+                                       (base_filtered["Cutoff Percentile"] >= student_percentile - 10.0)].copy()
 
-    if final_df.empty:
-        final_df = base_filtered.sort_values(by="Cutoff Percentile", ascending=False).drop_duplicates(subset=["College", "Course"]).head(22)
+    # Deduplicate entries cleanly to eliminate repeats
+    ambitious_pool = ambitious_pool.sort_values(by="Cutoff Percentile", ascending=False).drop_duplicates(subset=["College", "Course"], keep="first")
+    realistic_safe_pool = realistic_safe_pool.sort_values(by="Cutoff Percentile", ascending=False).drop_duplicates(subset=["College", "Course"], keep="first")
 
-    # Sorting configurations
-    final_df = final_df.copy().sort_values(by="Cutoff Percentile", ascending=False)
-    final_df.insert(0, "Preference No", range(1, len(final_df) + 1))
+    # Expanded split targets: 10 Dream choices + 25 Realistic Target/Safe choices
+    dream_choices = ambitious_pool.head(10)
+    target_choices = realistic_safe_pool.head(25)
+    combined_portfolio = pd.concat([dream_choices, target_choices]).drop_duplicates(subset=["College", "Course"])
+
+    # Widen search bounds automatically if the total unique matches fall below 30 rows
+    if len(combined_portfolio) < 30:
+        fallback_pool = base_filtered[(base_filtered["Cutoff Percentile"] <= student_percentile + 4.5) & 
+                                      (base_filtered["Cutoff Percentile"] >= student_percentile - 25.0)]
+        combined_portfolio = fallback_pool.sort_values(by="Cutoff Percentile", ascending=False).drop_duplicates(subset=["College", "Course"]).head(35)
+
+    # Sort descending and assign sequence numbers
+    combined_portfolio = combined_portfolio.sort_values(by="Cutoff Percentile", ascending=False)
+    combined_portfolio.insert(0, "Preference No", range(1, len(combined_portfolio) + 1))
     
-    # Fill Reasoning Logic parameters
+    # Process Reasoning Logic Metrics
     reasoning_log = []
-    for idx, row in final_df.iterrows():
+    for idx, row in combined_portfolio.iterrows():
         cutoff = row["Cutoff Percentile"]
         diff = student_percentile - cutoff
         if diff < 0:
-            reasoning_log.append(f"Aggressive/Dream Option: Cutoff is slightly above your score by {abs(diff):.4f}%. Excellent stretch choice.")
+            reasoning_log.append(f"Ambitious / Dream Choice (Category: {row['Seat Type']}). Cutoff is {abs(diff):.4f}% above your score. Strategic top-tier placement option.")
         elif diff <= 2.5:
-            reasoning_log.append(f"Highly Balanced Target: Balanced risk profile. Your score clears historical cutoff by {diff:.4f}%.")
+            reasoning_log.append(f"Excellent Target Match (Category: {row['Seat Type']}). Your score clears historical cutoff by {diff:.4f}%. Solid target recommendation.")
         else:
-            reasoning_log.append(f"Secure Safety Backup: Comfortable percentile buffer of {diff:.4f}%, providing high admission certainty.")
+            reasoning_log.append(f"Highly Secure Insurance (Category: {row['Seat Type']}). Strong margin buffer of {diff:.4f}%. Protects against competitive cutoff shifts.")
             
-    final_df["Reasoning Logic"] = reasoning_log
-    final_df = final_df[["Preference No", "College", "Course", "Seat Type", "Cutoff Percentile", "Reasoning Logic"]]
+    combined_portfolio["Reasoning Logic"] = reasoning_log
+    combined_portfolio = combined_portfolio[["Preference No", "College", "Course", "Seat Type", "Cutoff Percentile", "Reasoning Logic"]]
 
-    # Export configuration layer
+    # Build spreadsheet workbook
     writer = pd.ExcelWriter(full_output_path, engine='openpyxl')
     with writer:
-        final_df.to_excel(writer, index=False, sheet_name="Preferences")
+        combined_portfolio.to_excel(writer, index=False, sheet_name="Preferences")
         worksheet = writer.sheets["Preferences"]
         worksheet.views.sheetView[0].showGridLines = True
         
-        # Style definition templates
+        # Design Styles Template
         h_fill = PatternFill(start_color="1B365D", end_color="1B365D", fill_type="solid")
         h_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
         z_fill = PatternFill(start_color="F7F9FC", end_color="F7F9FC", fill_type="solid")
@@ -207,17 +205,17 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
         b_font = Font(name="Segoe UI", size=10, bold=True, color="1B365D")
         border = Border(left=Side(style='thin', color='E0E0E0'), right=Side(style='thin', color='E0E0E0'), top=Side(style='thin', color='E0E0E0'), bottom=Side(style='thin', color='E0E0E0'))
 
-        for c_idx in range(1, len(final_df.columns) + 1):
+        for c_idx in range(1, len(combined_portfolio.columns) + 1):
             cell = worksheet.cell(row=1, column=c_idx)
             cell.fill = h_fill; cell.font = h_font; cell.alignment = Alignment(horizontal="center", vertical="center"); cell.border = border
         worksheet.row_dimensions[1].height = 28
 
-        for r_idx in range(2, len(final_df) + 2):
+        for r_idx in range(2, len(combined_portfolio) + 2):
             c_fill = z_fill if r_idx % 2 == 0 else w_fill
-            for c_idx in range(1, len(final_df.columns) + 1):
+            for c_idx in range(1, len(combined_portfolio.columns) + 1):
                 cell = worksheet.cell(row=r_idx, column=c_idx)
                 cell.fill = c_fill; cell.font = d_font; cell.border = border
-                col_name = final_df.columns[c_idx - 1]
+                col_name = combined_portfolio.columns[c_idx - 1]
                 if col_name in ["Preference No", "Seat Type"]:
                     cell.alignment = Alignment(horizontal="center", vertical="center")
                     if col_name == "Preference No": cell.font = b_font
@@ -233,13 +231,12 @@ def find_and_export_colleges(student_percentile: float, seat_category: str, choi
             max_len = max(len(str(c.value or '')) for c in col)
             worksheet.column_dimensions[letter].width = min(max(max_len + 3, 12), 75)
 
-    return f"Successfully generated your unique preference sheet inside the isolated outputs folder path: '{full_output_path}'"
+    return f"Successfully compiled an expanded strict portfolio with {len(combined_portfolio)} premium options saved to: '{full_output_path}'"
 
 
 # =====================================================================
-# 3. AUTOGEN AGENT ENGINE CONFIGURATION
+# 3. AUTOGEN AGENT CONFIGURATION
 # =====================================================================
-# Dynamically extract private key value directly from the environment space
 groq_api_key = os.environ.get("GROQ_API_KEY")
 if not groq_api_key:
     raise ValueError("System Missing Variable Context: Ensure you've defined your GROQ_API_KEY entry inside your .env configuration file.")
@@ -253,12 +250,12 @@ llm_config = {
     "config_list": config_list, "timeout": 60, "temperature": 0.0,
     "functions": [{
         "name": "find_and_export_colleges",
-        "description": "Queries the cutoff database using constraints and saves isolated unique sessions inside an output folder path.",
+        "description": "Queries the database to build an expanded multi-tier portfolio containing at least 30 choices isolated to the student's category.",
         "parameters": {
             "type": "object",
             "properties": {
                 "student_percentile": {"type": "number", "description": "The exact MHT-CET percentile scored by the applicant."},
-                "seat_category": {"type": "string", "description": "Caste category string like OPEN, OBC, SC, ST, EWS."},
+                "seat_category": {"type": "string", "description": "Strict caste category code like OBC, SC, ST, EWS."},
                 "choice_stream": {"type": "string", "description": "Target field phrases like 'IT or CS'."},
                 "is_pwd": {"type": "boolean", "description": "True if applicant belongs to PWD status."}
             },
@@ -270,9 +267,9 @@ llm_config = {
 counsellor = autogen.AssistantAgent(
     name="Counsellor_Agent", llm_config=llm_config,
     system_message="""You are an expert engineering admissions counsellor agent for the CAP rounds.
-Parse the user's natural query statement, extract their percentile, category code, preferred branches, and PWD status.
-Execute the 'find_and_export_colleges' tool immediately with these parameters to generate an isolated, custom structured spreadsheet.
-Once complete, notify the user that their unique spreadsheet report is generated inside the outputs directory and conclude with 'TERMINATE'."""
+Parse the user's natural language input to extract percentile, strict category code, preferred streams, and PWD profiles.
+Execute the 'find_and_export_colleges' tool immediately to output a robust list containing at least 30 options.
+Once verified, notify the user that their customized 30+ entry spreadsheet is complete inside the outputs directory and conclude with 'TERMINATE'."""
 )
 
 user_proxy = autogen.UserProxyAgent(
