@@ -3,3 +3,5 @@ venv/
 .venv/
 env/
 .env/
+# Ignore environment credential files
+.env
