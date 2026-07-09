@@ -2,8 +2,9 @@ import os
 import re
 import time
 import json
+import threading
 import pandas as pd
-import pdfplumber
+import pdfplumber  
 import autogen
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -15,14 +16,7 @@ from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 load_dotenv()
 
-app = FastAPI(title="MHT-CET & JEE Counseling Engine with Production PDF RAG")
-
-@app.get("/")
-def read_root():
-    return {
-        "status": "online",
-        "message": "MHT-CET & JEE Counseling Engine API is running. Use the Streamlit interface to interact."
-    }
+app = FastAPI(title="MHT-CET Counseling Engine with Production PDF RAG")
 
 # Lock down the absolute workspace directory where your files sit
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,7 +25,19 @@ class ProcessingConfig:
     PDF_PATH = os.path.join(ROOT_DIR, "2023ENGG_CAP1_CutOff.pdf")
     OUTPUT_DIR = os.path.join(ROOT_DIR, "outputs")
 
+# Shared thread-safe structures
 df_database = None
+is_database_loaded = False  
+
+@app.get("/")
+def read_root():
+    global is_database_loaded, df_database
+    return {
+        "status": "online",
+        "database_ready": is_database_loaded,
+        "indexed_records": len(df_database) if df_database is not None else 0,
+        "message": "MHT-CET Counseling Engine API is running."
+    }
 
 # --- Pydantic Schema Layers ---
 class QueryPayload(BaseModel):
@@ -39,7 +45,6 @@ class QueryPayload(BaseModel):
     seat_category: str
     choice_stream: Optional[str] = "Any"
     is_pwd: Optional[bool] = False
-    jee_percentile: Optional[float] = 0.0
     preferred_city: Optional[str] = "Any"
     selected_gender: Optional[str] = "General Pool"
     target_university: Optional[str] = "Any"
@@ -49,12 +54,10 @@ class ExcelCompilePayload(BaseModel):
     student_percentile: float
     seat_category: str
     choice_stream: Optional[str] = "Any"
-    jee_percentile: Optional[float] = 0.0
 
 class ChatPayload(BaseModel):
     prompt: str
     ui_percentile: float
-    ui_jee_percentile: float
     ui_category: str
     ui_stream: Optional[str] = "Any"
     ui_pwd: Optional[bool] = False
@@ -62,22 +65,25 @@ class ChatPayload(BaseModel):
     ui_gender: Optional[str] = "General Pool"
     ui_university: Optional[str] = "Any"
 
-# --- Structural PDF Extraction Engine ---
-@app.on_event("startup")
-def compile_database_on_boot():
-    """Reads the root folder PDF dynamically on startup to populate the RAG framework."""
-    global df_database
-    print(f"Targeting PDF at: {ProcessingConfig.PDF_PATH}")
+last_compiled_portfolio = {}
+
+# --- High-Precision PDF Extraction Engine ---
+def compile_database_worker():
+    global df_database, is_database_loaded
+    print(f"BACKGROUND WORKER: Targeting PDF at: {ProcessingConfig.PDF_PATH}")
     
     if not os.path.exists(ProcessingConfig.PDF_PATH):
         print(f"CRITICAL: '{ProcessingConfig.PDF_PATH}' missing from root workspace.")
         return
         
     try:
+        start_time = time.time()
         reader = pdfplumber.open(ProcessingConfig.PDF_PATH)
         structured_data = []
+        
         current_college = "Unknown Institute"
-        current_branch = "General"
+        current_branch = "General Branch"
+        active_headers = []
         
         seat_token_pattern = re.compile(r'\b([GLPDRD][A-Z0-9]{3,8})\b')
         percentile_pattern = re.compile(r'\(\s*(\d{1,2}\.\d+)\s*\)')
@@ -86,21 +92,26 @@ def compile_database_on_boot():
             text = page.extract_text()
             if not text:
                 continue
+                
             for line in text.split('\n'):
                 line_str = line.strip()
                 if not line_str:
                     continue
+                
                 if re.search(r"^\d{4}\s*-", line_str):
                     current_college = line_str
                     continue
+                
                 if re.search(r"^\d{9}\s*-", line_str):
                     current_branch = line_str
                     continue
+                
                 if "GOPENS" in line_str or "GOPENH" in line_str or "LOPEN" in line_str:
                     seats = seat_token_pattern.findall(line_str)
-                    if seats: active_headers = seats
+                    if seats: 
+                        active_headers = seats
                     continue
-                    
+                
                 scores = percentile_pattern.findall(line_str)
                 if scores and active_headers:
                     for idx, score_val in enumerate(scores):
@@ -111,20 +122,32 @@ def compile_database_on_boot():
                                 "Seat Type": active_headers[idx],
                                 "Cutoff Percentile": float(score_val)
                             })
+            
+            page.flush_cache()
                             
-        df_database = pd.DataFrame(structured_data).drop_duplicates()
-        print(f"RAG Layer Primed: Successfully indexed {len(df_database)} rows directly from the PDF.")
+        if structured_data:
+            df_database = pd.DataFrame(structured_data).drop_duplicates()
+            is_database_loaded = True
+            print(f"RAG Layer Primed: Successfully indexed {len(df_database)} rows in {round(time.time() - start_time, 2)}s.")
+        else:
+            df_database = pd.DataFrame(columns=["College", "Course", "Seat Type", "Cutoff Percentile"])
+            is_database_loaded = True
+            
     except Exception as e:
-        print(f"Failed to read data from PDF: {str(e)}")
+        print(f"Failed to read data from PDF background thread: {str(e)}")
 
-# --- Core Matrix Retrieval Logic ---
+@app.on_event("startup")
+def compile_database_on_boot():
+    threading.Thread(target=compile_database_worker, daemon=True).start()
+
+# --- Core Matrix Retrieval Logic with Strict Equal Bracket Truncation ---
 def execute_matching_logic(payload: QueryPayload):
     global df_database
     if df_database is None or df_database.empty:
         return []
 
     cat = payload.seat_category.strip().upper()
-    effective_score = max(payload.student_percentile, payload.jee_percentile)
+    effective_score = payload.student_percentile
     
     if payload.is_pwd:
         targets = [f"PWD{cat}S", f"PWD{cat}H", f"PWD{cat}", f"PWDR{cat}S"]
@@ -160,52 +183,49 @@ def execute_matching_logic(payload: QueryPayload):
         regex_q = "|".join([re.escape(e) for e in expanded_tokens])
         base_filtered = base_filtered[base_filtered["Course"].str.contains(regex_q, case=False, na=False)]
 
-    # Dynamic pre-stratification mathematically bounds token counts to fit in generation boundaries
-    dream_pool = base_filtered[(base_filtered["Cutoff Percentile"] > effective_score) & (base_filtered["Cutoff Percentile"] <= effective_score + 5.0)].sort_values(by="Cutoff Percentile", ascending=False).head(20)
-    target_pool = base_filtered[(base_filtered["Cutoff Percentile"] >= effective_score - 1.5) & (base_filtered["Cutoff Percentile"] <= effective_score)].sort_values(by="Cutoff Percentile", ascending=False).head(25)
-    safety_pool = base_filtered[(base_filtered["Cutoff Percentile"] >= effective_score - 5.0) & (base_filtered["Cutoff Percentile"] < effective_score - 1.5)].sort_values(by="Cutoff Percentile", ascending=False).head(20)
+    # Exactly 10 rows per bracket matrix structure
+    dream_pool = base_filtered[(base_filtered["Cutoff Percentile"] > effective_score) & (base_filtered["Cutoff Percentile"] <= effective_score + 5.0)].sort_values(by="Cutoff Percentile", ascending=False).head(10)
+    target_pool = base_filtered[(base_filtered["Cutoff Percentile"] >= effective_score - 1.5) & (base_filtered["Cutoff Percentile"] <= effective_score)].sort_values(by="Cutoff Percentile", ascending=False).head(10)
+    safety_pool = base_filtered[(base_filtered["Cutoff Percentile"] >= effective_score - 6.0) & (base_filtered["Cutoff Percentile"] < effective_score - 1.5)].sort_values(by="Cutoff Percentile", ascending=False).head(10)
     
-    stratified_df = pd.concat([dream_pool, target_pool, safety_pool]).drop_duplicates(subset=["College", "Course"])
+    all_matches = []
+    for df_pool in [dream_pool, target_pool, safety_pool]:
+        for _, row in df_pool.iterrows():
+            all_matches.append({
+                "College": row["College"],
+                "Course": row["Course"],
+                "Seat Type": row["Seat Type"],
+                "Cutoff Percentile": row["Cutoff Percentile"]
+            })
+    return all_matches
 
-    compacted_records = []
-    for _, row in stratified_df.iterrows():
-        compacted_records.append({
-            "College": row["College"],
-            "Course": row["Course"],
-            "SeatType": row["Seat Type"],
-            "CutoffPercentile": row["Cutoff Percentile"]
-        })
-    return compacted_records
-
-def execute_excel_generation(payload: ExcelCompilePayload):
-    try:
-        data = json.loads(payload.json_chosen_records)
-    except Exception:
-        match = re.search(r"\[\s*\{.*\}\s*\]", payload.json_chosen_records, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-        else:
-            raise ValueError("Provided configuration string cannot be successfully loaded as valid JSON data.")
-
-    if len(data) > 30:
-        data = data[:30]
-        
+# --- Excel Generation Engine ---
+def execute_excel_generation_from_raw(data_list, student_percentile, seat_category):
     reconstructed_rows = []
-    for idx, item in enumerate(data):
+    for idx, item in enumerate(data_list[:30]):
+        raw_pct = float(item.get("Cutoff Percentile", item.get("CutoffPercentile", 0.0)))
+        
+        if raw_pct > student_percentile:
+            raw_reason = f"Dream Option: Cutoff ({raw_pct}%) is higher than your score ({student_percentile}%). Ambitious high-reach preference."
+        elif raw_pct >= student_percentile - 1.5:
+            raw_reason = f"Target Option: Cutoff ({raw_pct}%) closely mirrors your score ({student_percentile}%). Strong practical chance of admission."
+        else:
+            raw_reason = f"Safety Option: Cutoff ({raw_pct}%) acts as a highly secure backup buffer to prevent CAP elimination."
+
         reconstructed_rows.append({
             "Preference No": idx + 1,
             "College": item.get("College", "Unknown Institution"),
             "Course": item.get("Course", "Unknown Course Branch"),
-            "Seat Type": item.get("SeatType", item.get("Seat Type", "N/A")),
-            "Cutoff Percentile": float(item.get("CutoffPercentile", item.get("Cutoff Percentile", 0.0))),
-            "Reasoning Logic": item.get("Reasoning Logic", item.get("ReasoningLogic", "Portfolio Match"))
+            "Seat Type": item.get("Seat Type", item.get("SeatType", "N/A")),
+            "Cutoff Percentile": raw_pct,
+            "Reasoning Logic": raw_reason
         })
         
     df = pd.DataFrame(reconstructed_rows)
     if not os.path.exists(ProcessingConfig.OUTPUT_DIR):
         os.makedirs(ProcessingConfig.OUTPUT_DIR)
 
-    filename = f"CAP_Strict_{payload.seat_category.upper()}_{payload.student_percentile}_{int(time.time())}.xlsx"
+    filename = f"CAP_Strict_{seat_category.upper()}_{student_percentile}_{int(time.time())}.xlsx"
     full_output_path = os.path.join(ProcessingConfig.OUTPUT_DIR, filename)
 
     writer = pd.ExcelWriter(full_output_path, engine='openpyxl')
@@ -244,23 +264,12 @@ def execute_excel_generation(payload: ExcelCompilePayload):
 
     return {"filepath": full_output_path, "preview_data": df.to_dict(orient="records")}
 
-# --- REST App Interface Routes ---
-@app.post("/api/v1/match-colleges")
-def get_matching_colleges(payload: QueryPayload):
-    return execute_matching_logic(payload)
-
-@app.post("/api/v1/generate-excel")
-def generate_excel_report(payload: ExcelCompilePayload):
-    try:
-        return execute_excel_generation(payload)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
+# --- Clean Direct Agent Layer ---
 @app.post("/api/v1/chat")
 def process_counselor_chat(payload: ChatPayload):
-    """Executes the standard LLM instruction set over PDF extracted data."""
+    global last_compiled_portfolio, df_database
     if df_database is None or df_database.empty:
-        raise HTTPException(status_code=503, detail="RAG Engine Data Context is empty. Verify root PDF file is present.")
+        raise HTTPException(status_code=503, detail="The PDF data is currently processing in the background.")
 
     groq_key = os.environ.get("GROQ_API_KEY", "missing_key")
     config_list = [{'model': 'llama-3.3-70b-versatile', 'api_key': groq_key, 'api_type': 'openai', 'base_url': 'https://api.groq.com/openai/v1'}]
@@ -269,85 +278,54 @@ def process_counselor_chat(payload: ChatPayload):
         student_percentile=payload.ui_percentile, 
         seat_category=payload.ui_category,
         choice_stream=payload.ui_stream, 
-        is_pwd=payload.ui_pwd, 
-        jee_percentile=payload.ui_jee_percentile,
         preferred_city=payload.ui_city, 
         selected_gender=payload.ui_gender, 
         target_university=payload.ui_university
     )
-    raw_matches = execute_matching_logic(q_payload)
-    raw_csv_context = pd.DataFrame(raw_matches).to_csv(index=False)
+    filtered_matches = execute_matching_logic(q_payload)
     
-    # Standardized Normal Instructions for the Counselor Agent[cite: 2]
-    standard_instructions = f"""You are an helpful, expert AI College Admission Counselor for Maharashtra engineering colleges.
-Your goal is to help students generate a balanced list of up to 30 college preferences based on their score of {payload.ui_percentile}%.[cite: 2]
-
-Here is the data found in our database matching their profile:
-{raw_csv_context}
-
-INSTRUCTIONS:
-1. Review the options above and pick up to 30 of the best recommendations.[cite: 2]
-2. Categorize your choices based on their score:
-   - "Dream Options": Cutoffs higher than the student's score.[cite: 2]
-   - "Target Options": Cutoffs right around the student's score.[cite: 2]
-   - "Safety Options": Cutoffs lower than the student's score acting as a safe backup.[cite: 2]
-3. Sort the list from the highest cutoff percentile down to the lowest.[cite: 2]
-4. For each selected choice, write a brief 'Reasoning Logic' explaining why it's a good fit.[cite: 2]
-
-STEPS TO EXECUTE:
-1. Format your selected 30 rows as a valid JSON array.[cite: 2]
-2. Call the tool 'internal_compile_excel' with this JSON string to automatically create the downloadable sheet on the user interface.[cite: 2]
-3. After the tool executes successfully, provide a friendly summary breakdown of your advice to the student and append 'TERMINATE' to end your thought process."""
-
-    agent_llm_config = {
-        "config_list": config_list, 
-        "timeout": 120, 
-        "temperature": 0.2
-    }
-
-    counsellor = autogen.AssistantAgent(
-        name="Counsellor_Brain_Agent", 
-        llm_config=agent_llm_config,
-        system_message=standard_instructions
-    )
+    session_key = f"{payload.ui_percentile}_{payload.ui_category}"
+    current_saved_list = last_compiled_portfolio.get(session_key, [])
     
+    is_feedback_request = any(keyword in payload.prompt.lower() for keyword in ["remove", "replace", "swap", "change", "instead", "don't want", "move", "add"])
+    
+    if is_feedback_request and current_saved_list:
+        updated_list = []
+        for row in current_saved_list:
+            if not any(keyword in row["College"].lower() for keyword in payload.prompt.lower().split()):
+                updated_list.append(row)
+        
+        while len(updated_list) < 30 and len(filtered_matches) > len(updated_list):
+            for match in filtered_matches:
+                if match["College"] not in [r["College"] for r in updated_list]:
+                    updated_list.append(match)
+                    break
+        final_list = updated_list[:30]
+    else:
+        final_list = filtered_matches[:30]
+
+    last_compiled_portfolio[session_key] = final_list
+    res = execute_excel_generation_from_raw(final_list, payload.ui_percentile, payload.ui_category)
+    
+    summary_instructions = f"""You are an elite expert AI College Admission Counselor for Maharashtra engineering CAP rounds. 
+    Your tone must be highly supportive, reassuring, and professional. Speak like a real senior advisor.
+    Provide a brief and helpful overview of the selection compiled for a {payload.ui_percentile}% score. Do NOT include any technical code, raw JSON, or agent payloads."""
+    
+    counsellor = autogen.AssistantAgent(name="Counsellor_Brain", llm_config={"config_list": config_list}, system_message=summary_instructions)
+    
+    # CRITICAL DOCKER PROTECTION GUARD: Explicitly set use_docker to False to avoid runtime crashes on Hugging Face
     user_proxy = autogen.UserProxyAgent(
         name="User_Proxy", 
         human_input_mode="NEVER", 
-        max_consecutive_auto_reply=3, 
-        is_termination_msg=lambda x: "TERMINATE" in (x.get("content") or ""),
+        max_consecutive_auto_reply=1,
         code_execution_config={"use_docker": False}
     )
     
-    execution_context = {"filepath": None, "preview_data": None}
-
-    def internal_compile_excel(json_chosen_records: str, student_percentile: float, seat_category: str, choice_stream: str = "Any", jee_percentile: float = 0.0):
-        p = ExcelCompilePayload(
-            json_chosen_records=json_chosen_records, 
-            student_percentile=student_percentile, 
-            seat_category=seat_category, 
-            choice_stream=choice_stream, 
-            jee_percentile=jee_percentile
-        )
-        res = execute_excel_generation(p)
-        execution_context["filepath"] = res["filepath"]
-        execution_context["preview_data"] = res["preview_data"]
-        return f"Success! Excel document compiled at: {res['filepath']}"
-        
-    autogen.register_function(
-        internal_compile_excel,
-        caller=counsellor,
-        executor=user_proxy,
-        name="internal_compile_excel",
-        description="Compiles curated strategic records into an Excel sheet layout structure."
-    )
-
-    user_proxy.initiate_chat(counsellor, message=payload.prompt, silent=True)
-    
-    final_reply = counsellor.last_message()["content"].replace("TERMINATE", "").strip()
+    user_proxy.initiate_chat(counsellor, message=f"Provide a friendly expert counselor summary for a student profile with score {payload.ui_percentile}%.", silent=True)
+    final_reply = counsellor.last_message()["content"].strip()
 
     return {
-        "reply": "Preference sheet generated successfully!" if not final_reply else final_reply, 
-        "filepath": execution_context["filepath"], 
-        "preview_data": execution_context["preview_data"]
+        "reply": final_reply if final_reply else "Your preference list has been re-proportioned with exactly 10 Dream, 10 Target, and 10 Safety choices successfully!", 
+        "filepath": res["filepath"], 
+        "preview_data": res["preview_data"]
     }
